@@ -1,0 +1,735 @@
+################################################################################
+# EDX_PH125-9x_PRJ2_MedAptNoShow_Chris-FR
+################################################################################
+# This file is a conversion of the original RMD using knitr
+#   library(knitr)
+#   purl("EDX_PH125-9x_PRJ2_MedAptNoShow_Chris-FR.Rmd", 
+#          output = "EDX_PH125-9x_PRJ2_MedAptNoShow_Chris-FR.R", documentation = 2)
+################################################################################
+#' ---
+#' title: "Medical Appointment No Shows"
+#' author: "Chris-FR"
+#' date: "20 Feb. 2019"
+#' output:
+#'   pdf_document: default
+#'   html_document:
+#'     keep_md: yes
+#' geometry: left=2cm,right=2cm,top=1cm,bottom=2cm
+#' ---
+#' 
+## ----setup, include=FALSE------------------------------------------------
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set( fig.path = "figure/")
+knitr::opts_chunk$set( fig.show = "hold")
+
+#' 
+#' # Introduction
+#' 
+#' For the second project, the EDX PH125.9x capstone course, we will try to predict when a patient makes a doctor 
+#' appointment, if they will show up or not. The cost of heath care is expensive and continues to rise and securing 
+#' an appointment with a specialist can take months, we need to look at the consequenses and impacts that a patient 
+#' who does not show to an appointment has on the system.  A high "no show" rate (20% in this dataset) is an 
+#' important source of optimization. Furthermore, a no-show patient denies another patient an appointment 
+#' who really needs it.  
+#' In this report, we will:  
+#' - do a quick data exploratory analysis,  
+#' - split our data between a train and a validation datasets,  
+#' - build different models,  
+#' - test the accuracy model on our validation dataset.  
+#' 
+#' The original dataset of this project can be found on [kaggle](https://www.kaggle.com)'s page: 
+#' [Medical Appointment No Shows](https://www.kaggle.com/joniarroba/noshowappointments).  
+#' 
+#' # Data exploration and visualization
+#' 
+#' ## Loading data
+#' 
+## ----load, message=FALSE, warning=FALSE, cache=TRUE----------------------
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+if(!require(summarytools)) install.packages("summarytools", repos = "http://cran.us.r-project.org")
+
+# load the ZIP file using the read_csv function of the names(aptds) package
+aptds = read_csv("noshowappointments.zip")
+# rename some of the columns
+names(aptds)[names(aptds) == 'Hipertension'] <- 'Hypertension'
+names(aptds)[names(aptds) == 'Handcap'] <- 'Disability'
+names(aptds)[names(aptds) == 'Scholarship'] <- 'SocialAid'
+names(aptds)[names(aptds) == 'SMS_received'] <- 'SMS'
+names(aptds)[names(aptds) == 'No-show'] <- 'NoShow'
+
+
+## ----locale, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE---------
+# oldlocale <- Sys.getlocale(category = "LC_ALL")
+# Sys.setlocale(category = "LC_ALL", locale = "US")
+oldlocale <- Sys.getlocale(category = "LC_TIME")
+nullout <- Sys.setlocale("LC_TIME", "English")
+
+#' The dataset contains **`r dim(aptds)[1]`** records of **`r dim(aptds)[2]`**  features. It contains **`r sum(is.na(aptds))`** NAs. 
+## ----desccol, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE--------
+desctbl <- data.frame(
+    Column = names(aptds),
+    Type = unlist(lapply(sapply(aptds, class), `[[`, 1)),
+    Label = c(
+        "Identification of a patient",
+        "Identification of each appointment",
+        "Male or Female",
+        "The day someone called or registered the appointment",
+        "Appointment Day",
+        "Patient age",
+        "Where the appointment takes place",
+        "True or False, Social Aid",
+        "True or False",
+        "True or False",
+        "True or False",
+        "1 to 4",
+        "1 or more messages sent to the patient.",
+        "True or False - The patient came to his appointment or not"
+    )
+)
+desctbl[-1] %>% knitr::kable()
+
+#' 
+#' ## Data quick check / validation
+#' 
+#' The data has been loaded with the default parameters. We will convert **factor** columns after the checks.
+#' 
+#' ### Patients / Appointments
+#' 
+#' There are `r length(unique(aptds$PatientId))` unique patients and `r length(unique(aptds$AppointmentID))` unique appointments (there are no duplicated appointements).
+#' 
+## ----patientneigh, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE----
+# compute the number of Neighbourhood o patients go
+patientneigh <- aptds %>% select(PatientId, Neighbourhood) %>%
+     group_by(PatientId) %>% 
+     summarize(N = n_distinct(Neighbourhood)) 
+# compute the nb of Apts for the same patients
+patientapt <- aptds %>% group_by(PatientId) %>% 
+     summarize(AptNb = n())
+
+#' 
+#' Patients go to *`r length(unique(patientneigh$N))`* neighbourhood only : the PatientId may not be a *global* Ids like the SSN, ... but hospital / location Ids. This may be interesting as we may add Patients information in our model as it will be available when this patient schedules an appointement at the hospital / clinic / ...
+#' 
+#' Number of appointements by patient:  
+#' 
+## ----sumpatientneigh, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE----
+# summary : nb of Apts for the same patients
+summary(patientapt$AptNb)
+
+#' 
+#' Only *`r sum(patientapt$AptNb > 10)`* patients had more than 10 appointments and most patients have 1 or 2 appointments.  
+#' 
+#' ### Numeric column summary
+## ----sumnumeric, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE-----
+aptds %>% select_if(is.numeric) %>% select (-c(PatientId, AppointmentID)) %>% summary()
+
+#' 
+#' We have some invalid values in the **Age** column : -1 and the max is high : 115.  
+#' 
+## ----checkage, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE-------
+aptds %>% filter(Age < 0 | Age > 100) %>% select(PatientId, AppointmentID, Age, AppointmentDay,NoShow) %>% 
+    arrange(Age,PatientId, AppointmentDay) %>% knitr::kable()
+
+#' 
+#' Using the `freq` function from the `summarytools` package, Hypertension, Diabetes, Alcoholis only contains 0 and 1.
+#' 
+#' 
+#' **SMS** reminders are sent in 32% of the appointments:  
+## ----tablesms, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE,results='asis'----
+summarytools::freq(aptds$SMS, order = "freq",totals = FALSE, 
+                   display.type=FALSE, omit.headings=TRUE,style="rmarkdown")
+
+#' 
+#' **Disability** contains 5 different values:  
+## ----tabledisability, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE,results='asis'----
+summarytools::freq(aptds$Disability, order = "freq",totals = FALSE, 
+                   display.type=FALSE, omit.headings=TRUE,style="rmarkdown")
+
+#' 
+#' ### Character columns
+#' 
+#' **Gender** contains 2 values. 65% of the appointments are for Female patients.  
+## ----tablegendre, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE,results='asis'----
+summarytools::freq(aptds$Gender, order = "freq",totals = FALSE, 
+                   display.type=FALSE, omit.headings=TRUE,style="rmarkdown")
+
+#' 
+#' **NoShow** contains 2 values. 20% of the appointements are 'No Show'.  
+## ----tablenoshow, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE,results='asis'----
+summarytools::freq(aptds$NoShow, order = "freq",totals = FALSE, 
+                   display.type=FALSE, omit.headings=TRUE,style="rmarkdown")
+
+#' 
+#' ### Date columns
+#' There are 2 POSIXct columns:  
+## ----sumdate, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE--------
+aptds %>% select_if(negate(is.numeric)) %>% select_if(negate(is.character)) %>% summary()
+
+#' 
+#' The dataset contains `r length(unique(aptds$AppointmentDay))` appointments dates.
+#' The dataset contains `r length(unique(as.Date(aptds$ScheduledDay)))` scheduled dates. The scheduled columns contains the time.  
+#' 
+#' Monday to Wednesday are the main appointment days. Thursday and friday have a little bit less appointments. There are very few appointment on Saturdays.  
+## ----tableaptdate, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE,results='asis'----
+nullout <- Sys.setlocale("LC_TIME", "English")
+summarytools::freq(format(aptds$AppointmentDay, format = "%A"), order = "freq",totals = FALSE, 
+                   display.type=FALSE, omit.headings=TRUE,style="rmarkdown")
+
+#' 
+#' Delta between Sheduled and Appointment dates :  
+## ----sumdatediff, echo=FALSE,message=FALSE, warning=FALSE, cache=TRUE----
+deltas <- as.numeric(difftime(aptds$AppointmentDay ,as.Date(aptds$ScheduledDay) , units = c("days")))
+sumd <- summary(deltas)
+sumd
+
+#' We have **`r sum(deltas < 0)`** invalid records (delta < 0). The average delta is **`r round(sumd[4],1)`** days and the max delta is **`r sumd[6]`** days
+#' 
+#' 
+#' ### Data conversion / clean up
+#' 
+#' We will :  
+#' - set the Age value -1 to 0,   
+#' - convert : Gender, Neighbourhood, SocialAid, Hypertension, Diabetes, Alcoholism, Disability, SMS and NoShow to factors,  
+#' - add the appointment week day (1 is Monday),  
+#' - add the delta between the scheduled and appointment days and set the negative deltas to 0,  
+#' - create an AgeBreak column (5 years intervals).
+#' 
+## ----convcleanup, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE----
+## Data conversion / clean up
+# convert 0 / 1 factor
+aptds$SocialAid <- as.factor(aptds$SocialAid)
+aptds$Hypertension <- as.factor(aptds$Hypertension)
+aptds$Diabetes <- as.factor(aptds$Diabetes)
+aptds$Alcoholism <- as.factor(aptds$Alcoholism)
+aptds$Disability <- as.factor(aptds$Disability)
+aptds$SMS <- as.factor(aptds$SMS)
+# Neighbourhood
+aptds$Neighbourhood <- as.factor(aptds$Neighbourhood)
+# Gender
+aptds$Gender <- as.factor(aptds$Gender)
+# No Show
+aptds$NoShow <- as.factor(aptds$NoShow)
+# week day
+aptds$aptweekday <- as.numeric(format(aptds$AppointmentDay, format = "%u"))
+# sch apt delta
+aptds$schaptdelta <- as.numeric(difftime(aptds$AppointmentDay , as.Date(aptds$ScheduledDay) , units = c("days")))
+
+# clean age and delta
+aptds[aptds$Age<0,]$Age <- 0
+aptds[aptds$schaptdelta<0,]$schaptdelta <- 0
+
+# Create the Age break
+step <- 5
+aptds$AgeBreak <- cut(x = aptds$Age, breaks = c(seq(0, 90, by =step), 120), 
+                          include.lowest=TRUE, right = FALSE)
+
+# str(aptds)
+
+#' 
+#' We will try to add 2 patients specific data.   
+#' **I will consider that i have access to the previous Patient data when he takes en appointment.**  
+#' We will add  
+#' - the Apt number (Apt rank : this is his first, second, third, ... appointment),  
+#' - if the patient miss his **last** appointment,  
+#' - the percentage of previously missed appointement.
+#' 
+## ----convcleanup2, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE----
+# compute the RANK
+# aptds <- aptds %>% 
+#     group_by(PatientId) %>% 
+#     mutate(AptNumber = rank(order(AppointmentDay, AppointmentID))) %>%
+#     ungroup()
+aptds <- aptds %>% 
+    group_by(PatientId) %>% 
+    arrange(AppointmentDay, AppointmentID) %>%
+    mutate(AptNumber = rank(AppointmentDay, ties.method="first")) %>%
+    ungroup()
+
+# duplicate to have an easy code to read
+aptdsprevious <- aptds %>% 
+    select(PatientId, AptNumber, NoShow) %>%
+    rename(PreviousNoShow = NoShow)
+
+ # compute if the patient went to his last Apt  
+aptds$PreviousNoShow <- aptds %>% 
+    mutate(AptNumber = AptNumber - 1) %>%
+    left_join(aptdsprevious, by = c("PatientId","AptNumber")) %>%
+    mutate(PreviousNoShow = replace_na(PreviousNoShow, 'No')) %>% .$PreviousNoShow
+
+# compute the previous NoShow count and %
+aptds <- aptds %>% group_by(PatientId) %>% 
+    arrange(AptNumber) %>%
+    mutate(PreviousNoShowCount=cumsum(NoShow=='Yes') - (NoShow=='Yes') ) %>%
+    mutate(PreviousPercentNoShow = PreviousNoShowCount) %>%
+    ungroup()
+
+aptds$PreviousPercentNoShow <- 
+    ifelse(aptds$PreviousPercentNoShow>0 & aptds$AptNumber>1, 
+           aptds$PreviousPercentNoShow / (aptds$AptNumber-1), 
+           aptds$PreviousPercentNoShow)
+
+# rm temp table
+rm(aptdsprevious)
+
+# str(aptds)
+
+#' 
+#' Here is an exemple (patient 762753796133238) of these new columns:  
+#' 
+## ----convcleanup3, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE----
+p <- 762753796133238
+aptds %>% filter(PatientId == p) %>% 
+    select(AppointmentDay, Gender, NoShow, AptNumber,
+           PreviousNoShow, PreviousNoShowCount, PreviousPercentNoShow) %>% 
+    arrange(AptNumber) %>%
+    knitr::kable()
+
+#'   
+#' The first record have no history (Previous NoShow = 0). The second ahe 0 or 1 (0% or 100%).  
+#' 
+#' ## Data exploration
+#' 
+#' ### Gender
+#' 
+## ----plotfunctions, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE----
+# plot count for factor variable
+getcountplot <- function(colname){
+    aptds %>% ggplot(aes(x=get(colname))) +
+        geom_bar(stat='count',colour="darkblue", fill="#86A8D1") +
+        geom_text(aes(label = scales::percent((..count..)/sum(..count..))), 
+                  stat = "count", vjust = -0.25, colour="black" ) +
+        labs(title = colname,
+             x = colname, 
+             y = "Count")
+}
+# plot NoShow by columnname facet
+# percentatge are facets ones
+getcountplotbyfacet <- function(colname){
+    cols<- c('darkolivegreen','darkred')
+    aptds %>% ggplot(aes(x=NoShow, fill=NoShow)) +
+        geom_bar(stat='count',colour="darkblue") +
+        facet_grid(~get(colname)) +
+        geom_text(aes(label = scales::percent((..count..)/sapply(PANEL, FUN=function(x) sum(count[PANEL == x])))),
+                  stat = "count", vjust = -0.25, colour="black" ) +
+        scale_fill_manual(name="Bars",values=cols) +
+        labs(title = paste("NoShow by", colname),
+             x = "NoShow", 
+             y = "Count") +
+        theme(legend.position='none')
+}
+
+## ----plotgender, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=4, fig.width=8----
+p1 <- getcountplot("Gender")
+p2 <- getcountplotbyfacet("Gender")
+# display plots side by side
+grid.arrange(p1, p2, ncol=2)
+
+#' 
+#' Gender does not seem to have an impact on the No-Show rate. Both Male and Female patients have a 20% No-Show rate (the average).  
+#' 
+#' ### Appointment weekday
+#' 
+## ----plotweekday, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=6, fig.width=6----
+p1 <- getcountplot("aptweekday")
+p2 <- getcountplotbyfacet("aptweekday")
+# display plots side by side
+grid.arrange(p1, p2, nrow=2 ,ncol=1)
+
+#' 
+#' Even if there are less appointements on Thursday and Friday, the evrage No-Show does not vary a lot (less than 1% compare to the average).  
+#' 
+#' ### Age
+#' 
+## ----plotage1, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=4, fig.width=8----
+# global average No-Show
+avgnoshow <- mean(aptds$NoShow=='Yes')
+
+# function to plot a simple count
+getcountplotsimple <- function(colname, collabel){
+    aptds %>% 
+        group_by_(colname) %>% summarise(Total=n(), PercentNoShow=sum(NoShow=='Yes')/n()) %>%
+        ggplot(aes(x=get(colname), y=Total)) +
+        geom_bar(stat='identity',colour="darkblue", fill="#86A8D1") + 
+        theme(axis.text.x = element_text(angle = 90, hjust = 1))  +
+        labs(title = paste("Nb of Apts by",collabel),
+             x = collabel, 
+             y = "Count")
+} 
+# getcountplotsimple("AgeBreak", "AgeBreak")
+
+# function to plot a simple percant of No-Show for each group
+getpercentplotsimple <- function(colname, collabel){
+    
+    avgnoshow <- mean(aptds$NoShow=='Yes')
+    
+    aptds  %>% 
+    group_by_(colname) %>% summarise(Total=n(), PercentNoShow=sum(NoShow=='Yes')/n()) %>%
+    ggplot(aes(x=get(colname), y=PercentNoShow)) +
+    geom_bar(stat='identity',colour="darkblue", fill="darkred") + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))  +
+    scale_y_continuous(labels = scales::percent) +
+    labs(title = paste("% No-Show by ", collabel),
+         x = collabel, 
+         y = "% No-Show") +
+    geom_hline(yintercept = avgnoshow, col='darkgreen', size=1.5)
+}
+# getpercentplotsimple("AgeBreak", "AgeBreak")
+
+
+# Nb of apts by age range
+getcountplotsimple("AgeBreak", "Age range")
+
+
+## ----plotage2, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=4, fig.width=8----
+# % No Show by age range
+getpercentplotsimple("AgeBreak", "Age range")
+
+#' There seems to be 3 differents groups :  
+#' - young children (less than 5 years) have a lower No-Show rate than average. Their parents bring them to the appointments,   
+#' - patients from 5 to 45 years : have a higher No-Show rate than the average,  
+#' - patients older than 45 years have a lower No-Show rate.
+#' 
+#' For the patients older than 90 years have an average no-show rate but the number of associated appointments is low.
+#' 
+#' ### Neighbourhood
+#' 
+## ----plotneigh1, cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=5.5, fig.width=8----
+# Nb of apts by age range
+getcountplotsimple("Neighbourhood", "Neighbourhood")
+
+
+## ----plotneigh2, cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=5, fig.width=8----
+# % No Show by age range
+getpercentplotsimple("Neighbourhood", "Neighbourhood")
+
+#' There are a few variations depending of the neighbourhood. There are 2 outlier (100%, 0% NoShow) but the number of appointments is very low in both cases.  
+## ----neighoutlier, cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=5, fig.width=8----
+aptds  %>% 
+    group_by(Neighbourhood) %>% summarise(Total=n(), PercentNoShow=sum(NoShow=='Yes')/n()*100) %>%
+    arrange(PercentNoShow) %>% head(2) %>% knitr::kable()
+
+aptds  %>% 
+    group_by(Neighbourhood) %>% summarise(Total=n(), PercentNoShow=sum(NoShow=='Yes')/n()*100) %>%
+    arrange(desc(PercentNoShow)) %>% head(2) %>% knitr::kable()
+
+#' 
+#' ### SocialAid / Hypertension / Diabetes / Alcoholism / Disability
+#' 
+## ----plot, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=8, fig.width=8----
+p11 <- getcountplot("SocialAid")
+p12 <- getcountplotbyfacet("SocialAid")
+p21 <- getcountplot("Hypertension")
+p22 <- getcountplotbyfacet("Hypertension")
+p31 <- getcountplot("Diabetes")
+p32 <- getcountplotbyfacet("Diabetes")
+p41 <- getcountplot("Alcoholism")
+p42 <- getcountplotbyfacet("Alcoholism")
+# display plots side by side
+grid.arrange(p11, p12, p21, p22,
+             p31, p32, p41, p42,nrow=4 ,ncol=2)
+
+#' 
+#' Patients with Hypertension or Diabetes tends to have a lower No-Show percentage than average.  
+#' Alcoholism does not seem to have an impact.  
+#' patients with social aid have a higher No-Show percentage.  
+#' 
+## ----plotDisability, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=5, fig.width=8----
+p1 <- getcountplot("Disability")
+p2 <- getcountplotbyfacet("Disability")
+# display plots side by side
+grid.arrange(p1, p2, nrow=2 ,ncol=1)
+
+#' Patients with Disability type 1 have a lower No-Show percentage than average.  
+#' 
+#' ### Delta between scheduled and appointment days
+#' 
+## ----plotschaptdelta1, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=4, fig.width=8----
+# Nb of apts by deltas
+aptds %>%
+    group_by(schaptdelta) %>% summarise(Total=n(), PercentNoShow=sum(NoShow=='Yes')/n()) %>%
+    ggplot(aes(x=schaptdelta, y=Total)) +
+    geom_bar(stat='identity',colour="darkblue", fill="#86A8D1") + 
+    scale_y_continuous(trans='log10') +
+    labs(title = "Nb of Apts by Scheduled / Apt days delta",
+         x = "Date Delta", 
+         y = "Count (log 10 scale)")
+
+## ----plotschaptdelta2, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=4, fig.width=8----
+getpercentplotsimple("schaptdelta","schaptdelta")
+
+## ----sumschaptdelta, , cache=TRUE, message=FALSE, echo=FALSE-------------
+delta <- aptds %>% filter(schaptdelta == 0) %>%
+    group_by(schaptdelta) %>% summarise(Total=n(), Percent=n()/length(aptds$schaptdelta), PercentNoShow=sum(NoShow=='Yes')/n())
+
+#' **`r delta$Total`** appointments (**`r round(delta$Percent*100,1)`**%) have been scheduled the same day. These appointments have a very low No-Show rate : **`r round(delta$PercentNoShow*100,1)`**%.  
+#' 
+#' ### SMS
+#' 
+## ----plotsms, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=4, fig.width=8----
+p1 <- getcountplot("SMS")
+p2 <- getcountplotbyfacet("SMS")
+# display plots side by side
+grid.arrange(p1, p2, nrow=1 ,ncol=2)
+
+#' 
+#' Patients who received an SMS reminder tends to have a higher No-Show percentage. I would have think that reminders would have lower it.  
+#' 
+#' ### Patients
+#' 
+#' 
+## ----plotAptNumber, , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=5, fig.width=8----
+p1 <- getcountplot("AptNumber")
+p2 <- getpercentplotsimple("AptNumber", "AptNumber")
+# display plots side by side
+grid.arrange(p1, p2, nrow=2 ,ncol=1)
+
+#' 
+#' 2nd to 12th apointements seems to have a higher No-Show rate. After that, the rate is lower but as the number of appointments is low, it is not really a usefull.
+#' 
+## ----plotPreviousNoShow , cache=TRUE, message=FALSE, echo=FALSE, fig.align='center', fig.height=4, fig.width=8----
+cols<- c('darkolivegreen','darkred')
+aptds %>% filter(AptNumber > 1) %>%
+    ggplot(aes(x=NoShow, fill=NoShow)) +
+    geom_bar(stat='count',colour="darkblue") +
+    facet_grid(~PreviousNoShow) +
+    geom_text(aes(label = scales::percent((..count..)/sapply(PANEL, FUN=function(x) sum(count[PANEL == x])))),
+              stat = "count", vjust = -0.25, colour="black" ) +
+    scale_fill_manual(name="Bars",values=cols) +
+    labs(title = paste("NoShow by PreviousNoShow"),
+         x = "NoShow", 
+         y = "Count") +
+    theme(legend.position='none')
+
+#' If the patient missed his last appointment, he has twice more chances to miss this new one.
+#' 
+#' ### Observations
+#' 
+#' - Gender does not seem to have an effect on No-Show,  
+#' - Younger children and people above 45 years have a lower No-Show,  
+#' - Patients with social aid have a higher No-Show rate,  
+#' - Patients with Hypertension and Diabetes have a lower rate, Alcoholism does not seem to have an effect,  
+#' - Delta between scheduled and appointment days have an effect(the lower, the better) : if the appointment is taken the same day, the No-Show rate is lower,  
+#' - Patients who received an SMS reminder tends to have a higher No-Show percentage,  
+#' - If the patient missed his last appointment, he has twice more chances to miss this new one.
+#' 
+#' # Creating models
+#' 
+#' To facilitate the confusion matrix reading, we change the NoShow in Show (to set the NoShow as Positive)
+#' 
+## ----relevel , cache=TRUE, message=FALSE, echo=TRUE----------------------
+# save 
+aptds.sav <- aptds
+
+# transform NoShow in Show to have the NoShow in Positive column
+aptds$Show <- ifelse(aptds$NoShow=='Yes', "No", "Yes")
+aptds$Show <- as.factor(aptds$Show )
+aptds$NoShow<- NULL
+
+#' 
+#' ## Using CARET and setting Sensitivity as metric
+#' 
+#' As the classes are unbalanced (80-20), we choose Sensitivity over Accuracy. When we pick accuracy, the models tend to the class with the highest number of records, and we never predict any NoShow. 
+#' 
+#' We remove the keys and the dates. We also removed Neighbourhood but for a performance issue (> 8 hours).  
+#' 
+## ----filterfor model, cache=TRUE, message=FALSE, echo=TRUE---------------
+aptds <- aptds %>% select(-PatientId,-AppointmentID,
+                          -ScheduledDay,-AppointmentDay, 
+                          -Age, -Neighbourhood)
+
+names(aptds)
+
+#' 
+#' We split the model in Train and Test datasets.  
+#' 
+## ----splitdata , cache=TRUE, message=FALSE, echo=TRUE--------------------
+# split data in Train / test
+set.seed(123)
+test_index <- createDataPartition(y = aptds$Show, times = 1, p = 0.2, list = FALSE)
+training <- aptds[-test_index,]
+testing <- aptds[test_index,]
+
+#' We will use 5-folds cross validation and Sensitivity as metric.  
+## ----trainControl , cache=TRUE, message=FALSE, echo=TRUE-----------------
+## Sensitivity metric, 5 folds validations
+trControl <- trainControl(method="cv", number=5, 
+                          classProbs = TRUE, 
+                          savePredictions=TRUE,
+                          summaryFunction = twoClassSummary,
+                          allowParallel=TRUE)
+metric <- "Sens"
+
+## ----doParallel , cache=TRUE, message=FALSE, echo=FALSE------------------
+# library(doParallel)
+# cores_2_use <- floor(0.8 * detectCores())
+# cl <- makeCluster(cores_2_use, outfile = "parallel_log.txt")
+# registerDoParallel(cl)
+
+#' 
+#' ### Building the models
+#' 
+#' We train 4 different models:  
+#' 
+## ----fittrain , cache=TRUE, message=FALSE, warning=FALSE, echo=TRUE------
+# Tree
+set.seed(123)
+fit.rpart <- train(Show~., data=training, method="rpart",  
+                   metric=metric, trControl=trControl,
+                   preProcess = c("center", "scale"))
+
+# Random Forest ***
+set.seed(123)
+fit.rf <- train(Show~., data=training, method="rf", metric=metric, 
+                trControl=trControl, preProcess = c("center", "scale"))
+
+# Logistic Regression
+set.seed(123)
+fit.glm <- train(Show~., data=training, method="glm", metric=metric, 
+                 trControl=trControl,
+                 preProcess = c("center", "scale"))
+
+# gradient boosting machine
+set.seed(123)
+fit.gbm <- train(Show~., data=training, method="gbm", metric=metric, 
+                      trControl=trControl, verbose=FALSE,
+                      preProcess = c("center", "scale"))
+
+#' 
+#' ### Comparing the models
+#' 
+#' To compare the models, we use the `resamples` function.  
+#' 
+## ----fitresamples , cache=TRUE, message=FALSE, warning=FALSE, echo=TRUE----
+# Compare algorithms using the resamples caret function
+results <- resamples(list(rpart=fit.rpart,
+                          rf=fit.rf,
+                          glm=fit.glm,
+                          gbm=fit.gbm))
+summary(results)
+
+## ----fitplot , cache=TRUE, message=FALSE, warning=FALSE, echo=FALSE------
+dotplot(results)
+
+#' 
+#' Of the 4 model tested, only the Random Forest model was able to achieve a sentitivity around 24%.  
+#' The delta between the scheduled day and the appointment dau seems to be the more important feature.  
+#' 
+## ----varImp , cache=TRUE, message=FALSE, warning=FALSE, echo=FALSE-------
+imp.rf <- varImp(fit.rf, scale=F)
+imp.rf <- imp.rf$importance
+imp.rf$Feature = row.names(imp.rf)
+imp.rf <- imp.rf[order(-imp.rf$Overall)[1:10],]
+ggplot(imp.rf, aes(x = reorder(Feature, Overall), y = Overall)) +
+       geom_bar(stat = "identity",colour="darkblue", fill="#86A8D1") +
+       coord_flip() + 
+       labs(title = "RF - TOP 10 features by importance",
+         x = "", 
+         y = "Importance")
+
+
+#' 
+#' 
+#' ### Checking RF on the test dataset
+#' 
+## ----predictrf , cache=TRUE, message=FALSE, warning=FALSE, echo=TRUE-----
+pred.rf <- predict(fit.rf, newdata=testing)
+confusionMatrix(pred.rf, testing$Show)
+
+#' 
+#' On the testing dataset, the Sensitivity is around 24% and the Positive Prediction Value around : 37%.  
+#' The accuracy is around 76% (if we predicted only "show"" it wouyld have been 80%) so there is no feature with a lot of predictive power in this model to account for the imbalance.
+#' 
+#' 
+#' ## Modifying the cutoff
+#' 
+#' In this section, we will compute a GLM model and try the find the best treshold to optimize the accuracy and sensitivity.  
+#' 
+## ----fitglm2 , cache=TRUE, message=FALSE, warning=FALSE, echo=TRUE-------
+# Boosting Logistic Regression
+set.seed(123)
+fit.glm2 <- train(Show~., data=training, method="glm", metric="ROC", 
+                 trControl=trControl,
+                 preProcess = c("center", "scale"))
+
+#' In this model, the delta between the cheduled and appointment days is still the main feature:  
+## ----varImp2 , cache=TRUE, message=FALSE, warning=FALSE, echo=FALSE------
+imp.glm2 <- varImp(fit.glm2, scale=F)
+imp.glm2 <- imp.glm2$importance
+imp.glm2$Feature = row.names(imp.glm2)
+imp.glm2 <- imp.glm2[order(-imp.glm2$Overall)[1:10],]
+ggplot(imp.glm2, aes(x = reorder(Feature, Overall), y = Overall)) +
+       geom_bar(stat = "identity",colour="darkblue", fill="#86A8D1") +
+       coord_flip() + 
+       labs(title = "GLM - TOP 10 features by importance",
+         x = "", 
+         y = "Importance")
+
+
+#' 
+#' ### Computing the treshold
+#' 
+#' To compute the treshold, we will use the model predicted values and not cross validation (I want to keep the Test dataset for the final validation).  
+#' 
+## ----computetreshold , cache=TRUE, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center', fig.height=4, fig.width=8----
+#Find cutoff probability which gives optimal combination of sensitivity and accuracy
+levels <- levels(fit.glm2$pred$obs)
+
+cutoff.df <- data.frame()
+for(i in seq(0,1, by=0.01))
+{
+    model_pred<- sapply(fit.glm2$pred$Yes, function(x) if(x>=i){'Yes'}else{'No'})
+    model_pred <- factor(model_pred, levels = levels)
+    # compute the sensitivity and accuracy using the confusionmatrix
+    conf.matrix <- confusionMatrix(model_pred, fit.glm2$pred$obs)
+    cutoff.df<-rbind(cutoff.df, 
+                     data.frame(
+                         treshold=i, 
+                         sensitivity=conf.matrix$byClass[["Sensitivity"]],
+                         accuracy=conf.matrix$overall[['Accuracy']]))
+    
+}
+
+# get the best treshold
+treshold.opt <- cutoff.df[which.min(abs(cutoff.df$accuracy-cutoff.df$sensitivity)),]
+
+# plot
+cutoff.df %>% ggplot(aes(x=treshold, y=sensitivity, colour = "Sensitivity")) +
+    geom_line() +
+    geom_line(aes(y=accuracy, colour = "Accuracy"))+
+    scale_colour_manual("", 
+                        values = c("Sensitivity"="darkgreen", "Accuracy"="red")) +
+    geom_vline(xintercept = treshold.opt$treshold, linetype = 2, color='darkblue') +
+    labs(title = "Accuracy vs Sensitivity",
+                   x = "probability treshold", 
+                   y = "Accuracy / Sensitivity")
+
+#' 
+#' The treshold optimizing accuracy and sensitivity is **`r treshold.opt$treshold`** (expected sensitivity : **`r round(treshold.opt$sensitivity*100, 1)`%**).  
+#' 
+#' ### Checking GML and threshold on the test dataset
+#' 
+## ----test2 , cache=TRUE, message=FALSE, warning=FALSE, echo=TRUE---------
+# compute the probality of each class for the Test dataset
+prob.glm2 <- predict(fit.glm2, newdata=testing, type='prob')
+# apply the treshold
+pred.glm2 <- sapply(prob.glm2$Yes, function(x) if(x>=treshold.opt$treshold){'Yes'}else{'No'})
+pred.glm2 <-factor(pred.glm2, levels = levels(testing$Show))
+# display the confusion matrix
+conf.glm2<-confusionMatrix(pred.glm2, testing$Show)
+conf.glm2
+
+#' 
+#' On the testing dataset, the Sensitivity is around **`r round(conf.glm2$byClass[["Sensitivity"]]*100,1)`%** 
+#' and the Positive Prediction Value around : **`r round(conf.glm2$byClass[["Pos Pred Value"]]*100,1)`%**.
+#' The accuracy is around **`r round(conf.glm2$overall[['Accuracy']]*100,1)`%**  
+#' 
+#' # Conclusion
+#' 
+#' None of the models gave excellent results. Even if the 2nd model gives a higher sensitivity of 63%, 
+#' it does not bring any precision. The choice may depend of the satff ability to call or send a 
+#' reminder to the predicted No-Show patients number.    
+#' The available and computed features does not seem to contain enought information to have a 
+#' better accuracy and to overcome the imbalance (apointment type, specialist, price, ...).  
+#' I did not check the techniques to try to resolving the No-Show class imbalance (weight, up 
+#' sample, down sample, smote) but this may be a way to improve the accuracy or at least the precision.  
